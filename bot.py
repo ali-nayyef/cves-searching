@@ -11,9 +11,10 @@ import time
 import logging
 import requests
 import sqlite3
+import re
+import html
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-import html
 
 load_dotenv()
 
@@ -124,6 +125,8 @@ def parse_cve(vuln: dict) -> dict | None:
     # ── Affected Products / CPE
     configs = cve.get("configurations", [])
     affected = []
+    
+    # 1. Try to get it from official NVD configurations
     for config in configs:
         for node in config.get("nodes", []):
             for cpe_match in node.get("cpeMatch", []):
@@ -133,7 +136,24 @@ def parse_cve(vuln: dict) -> dict | None:
                     product = parts[4].replace("_", " ").title()
                     version = parts[5] if parts[5] != "*" else "All versions"
                     affected.append(f"{product} {version}")
+                    
     affected = list(dict.fromkeys(affected))[:5]  # dedupe, max 5
+
+    # 2. NLP Fallback: If NVD hasn't assigned CPEs yet, extract from the description
+    if not affected and desc_en and desc_en != "No description available.":
+        m1 = re.search(r"The\s+(.+?)\s+(?:plugin|theme|extension)\s+for\s+WordPress.*?up\s+to.*?([0-9]+\.[0-9a-zA-Z\.\-]+)", desc_en, re.IGNORECASE)
+        m2 = re.search(r"(?:In|The)\s+([A-Za-z0-9\s\-]+)\s+(?:version|versions)\s+([0-9\.\-\, ]+)", desc_en, re.IGNORECASE)
+        m3 = re.search(r"^([A-Za-z0-9\s\-]+)\s+before\s+([0-9\.\-]+)", desc_en, re.IGNORECASE)
+        m4 = re.search(r"^([A-Za-z0-9\s\-]+)\s+through\s+([0-9\.\-]+)", desc_en, re.IGNORECASE)
+
+        if m1: affected.append(f"{m1.group(1).strip()} (Up to {m1.group(2).strip()})")
+        elif m2: affected.append(f"{m2.group(1).strip()} ({m2.group(2).strip()})")
+        elif m3: affected.append(f"{m3.group(1).strip()} (Before {m3.group(2).strip()})")
+        elif m4: affected.append(f"{m4.group(1).strip()} (Through {m4.group(2).strip()})")
+
+    # Final safeguard
+    if not affected:
+        affected.append("Check description for details")
 
     # ── CWE
     weaknesses = cve.get("weaknesses", [])
@@ -207,40 +227,56 @@ def score_bar(score: float) -> str:
 
 
 def format_message(cve: dict, poc_found: bool, poc_link: str) -> str:
-    emoji = SEVERITY_EMOJI.get(cve["severity"].upper(), "⚪")
-    bar   = score_bar(cve["score"])
-# ── HTML Escape & Clean Raw Inputs ─────────────────────────────────────────
-    # Truncate raw description first, then HTML escape it
-    desc = cve["desc"]
+    severity = str(cve.get("severity", "UNKNOWN")).upper()
+    emoji = SEVERITY_EMOJI.get(severity, "⚪")
+    bar = score_bar(float(cve.get("score", 0.0)))
+
+    # Truncate and safely HTML escape description
+    desc = str(cve.get("desc", "No description available."))
     if len(desc) > 600:
         desc = desc[:597] + "..."
     desc = html.escape(desc)
 
-    # Escape discoverer info
-    discoverer = html.escape(cve["discoverer"])
+    # Safely escape discoverer info
+    discoverer = html.escape(str(cve.get("discoverer", "Not disclosed")))
 
-    # Escape affected products strings
-    affected_escaped = [html.escape(prod) for prod in cve["affected"]]
-    affected_str = "\n".join(f"  • {a}" for a in cve["affected"]) if cve["affected"] else "  • Not specified"
-    cwe_str = ", ".join(cve["cwes"]) if cve["cwes"] else "N/A"
+    # Safely escape affected products strings
+    affected_list = cve.get("affected", [])
+    if not affected_list:
+        affected_str = "  • Not specified"
+    else:
+        affected_str = "\n".join(f"  • {html.escape(str(a))}" for a in affected_list)
+    
+    # Safely escape CWEs
+    cwes = cve.get("cwes", [])
+    cwe_str = html.escape(", ".join(str(c) for c in cwes)) if cwes else "N/A"
 
-    poc_str = f"✅ YES\n{poc_link}" if poc_found else "❌ No public PoC found yet"
+    # PoC logic
+    if poc_found and poc_link:
+        poc_str = f"✅ YES\n   🔗 {html.escape(poc_link)}"
+    elif poc_found:
+        poc_str = "✅ YES (Check sources for links)"
+    else:
+        poc_str = "❌ No public PoC found yet"
 
-    refs_str = "\n".join(f"  🔗 {r}" for r in cve["refs"]) if cve["refs"] else "  • NVD only"
+    # Reference URL compiling
+    refs = cve.get("refs", [])
+    refs_str = "\n".join(f"   🔗 {html.escape(str(r))}" for r in refs) if refs else "   • NVD only"
 
-    # truncate description
-    desc = cve["desc"]
-    if len(desc) > 600:
-        desc = desc[:597] + "..."
+    # Core meta identifiers
+    cve_id = html.escape(str(cve.get("id", "UNKNOWN-CVE")))
+    published = html.escape(str(cve.get("published", "Unknown")))
+    vector = html.escape(str(cve.get("vector", "N/A")))
+    score_val = cve.get("score", 0.0)
 
-   msg = f"""🚨 <b>NEW CVE ALERT</b> 🚨
+    msg = f"""🚨 <b>NEW CVE ALERT</b> 🚨
 ━━━━━━━━━━━━━━━━━━━━━━━
-🆔 <b>{cve['id']}</b>
-📅 Published: {cve['published']}
+🆔 <b>{cve_id}</b>
+📅 Published: {published}
 
-{emoji} <b>Severity: {cve['score']}/10 ({cve['severity']})</b>
+{emoji} <b>Severity: {score_val}/10 ({severity})</b>
 <code>{bar}</code>
-🔢 Vector: <code>{cve['vector']}</code>
+🔢 Vector: <code>{vector}</code>
 🛡️ CWE: {cwe_str}
 
 📦 <b>Affected Products:</b>
@@ -256,10 +292,10 @@ def format_message(cve: dict, poc_found: bool, poc_link: str) -> str:
 
 📚 <b>Sources:</b>
 {refs_str}
-  🔗 https://nvd.nist.gov/vuln/detail/{cve['id']}
-  🔗 https://www.cve.org/CVERecord?id={cve['id']}
+  🔗 https://nvd.nist.gov/vuln/detail/{cve_id}
+  🔗 https://www.cve.org/CVERecord?id={cve_id}
 ━━━━━━━━━━━━━━━━━━━━━━━
-#CVE #{cve['severity']} #BugBounty #Security"""
+#CVE #{severity} #BugBounty #Security"""
 
     return msg
 
