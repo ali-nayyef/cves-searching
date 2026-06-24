@@ -13,6 +13,7 @@ import requests
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
+import html
 
 load_dotenv()
 
@@ -208,7 +209,18 @@ def score_bar(score: float) -> str:
 def format_message(cve: dict, poc_found: bool, poc_link: str) -> str:
     emoji = SEVERITY_EMOJI.get(cve["severity"].upper(), "⚪")
     bar   = score_bar(cve["score"])
+# ── HTML Escape & Clean Raw Inputs ─────────────────────────────────────────
+    # Truncate raw description first, then HTML escape it
+    desc = cve["desc"]
+    if len(desc) > 600:
+        desc = desc[:597] + "..."
+    desc = html.escape(desc)
 
+    # Escape discoverer info
+    discoverer = html.escape(cve["discoverer"])
+
+    # Escape affected products strings
+    affected_escaped = [html.escape(prod) for prod in cve["affected"]]
     affected_str = "\n".join(f"  • {a}" for a in cve["affected"]) if cve["affected"] else "  • Not specified"
     cwe_str = ", ".join(cve["cwes"]) if cve["cwes"] else "N/A"
 
@@ -221,7 +233,7 @@ def format_message(cve: dict, poc_found: bool, poc_link: str) -> str:
     if len(desc) > 600:
         desc = desc[:597] + "..."
 
-    msg = f"""🚨 <b>NEW CVE ALERT</b> 🚨
+   msg = f"""🚨 <b>NEW CVE ALERT</b> 🚨
 ━━━━━━━━━━━━━━━━━━━━━━━
 🆔 <b>{cve['id']}</b>
 📅 Published: {cve['published']}
@@ -240,7 +252,7 @@ def format_message(cve: dict, poc_found: bool, poc_link: str) -> str:
 💥 <b>PoC Published?</b>
 {poc_str}
 
-🔍 <b>Discovered by:</b> {cve['discoverer']}
+🔍 <b>Discovered by:</b> {discoverer}
 
 📚 <b>Sources:</b>
 {refs_str}
